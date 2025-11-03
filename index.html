@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Twister Results Viewer</title>
+<style>
+body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, sans-serif; margin: 16px; }
+header { margin-bottom: 16px; }
+section { margin-bottom: 16px; }
+fieldset { border: 1px solid #ddd; padding: 12px; border-radius: 6px; }
+legend { padding: 0 6px; font-weight: 600; }
+label { display: inline-block; margin: 4px 8px 4px 0; }
+input[type="text"], input[type="url"], select { padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; min-width: 240px; }
+button { padding: 8px 12px; border: 1px solid #ccc; background: #f7f7f7; border-radius: 4px; cursor: pointer; }
+button:hover { background: #efefef; }
+.table-wrap { overflow: auto; max-height: 70vh; border: 1px solid #eee; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { border-bottom: 1px solid #eee; padding: 8px 10px; text-align: left; vertical-align: top; }
+th { position: sticky; top: 0; background: #fafafa; z-index: 1; }
+.sortable { cursor: pointer; }
+.sort-ind { color: #888; margin-left: 4px; }
+.status-passed { color: #1a7f37; font-weight: 600; }
+.status-failed { color: #d1242f; font-weight: 600; }
+.status-skipped, .status-blocked, .status-error, .status-timeout, .status-not\ run { color: #915906; font-weight: 600; }
+.controls-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; background: #f0f0f0; margin-right: 8px; font-size: 12px; }
+.small { font-size: 12px; color: #666; }
+hr { border: none; border-top: 1px solid #eee; margin: 12px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Twister Results Viewer</h1>
+  <div class="small">Source: single-run JSON bundle or Fabric API. Filters: platform, test suite name, test case name.</div>
+</header>
+
+<section>
+  <fieldset>
+    <legend>Data source</legend>
+    <div class="controls-row">
+      <label><input type="radio" name="source" value="json" checked> JSON bundle</label>
+      <label><input type="radio" name="source" value="fabric"> Fabric API</label>
+    </div>
+    <div id="json-source" style="margin-top:8px;">
+      <div class="controls-row">
+        <label>Local file <input type="file" id="jsonFile" accept="application/json"></label>
+        <span>or</span>
+        <label>Bundle URL <input type="url" id="jsonUrl" placeholder="https://.../single_run.json"></label>
+        <button id="loadJsonBtn">Load JSON</button>
+      </div>
+    </div>
+    <div id="fabric-source" style="margin-top:8px; display:none;">
+      <div class="controls-row">
+        <label>API base <input type="url" id="apiBase" placeholder="https://api.example.com"></label>
+        <label>Commit SHA <input type="text" id="commitSha" placeholder="optional"></label>
+        <button id="loadFabricBtn">Load from Fabric</button>
+      </div>
+      <div class="small">The API should implement: GET {API_BASE}/fabric/cases?commit_sha=...&platform=...&suite=...&case=...</div>
+    </div>
+  </fieldset>
+</section>
+
+<section>
+  <fieldset>
+    <legend>Filters</legend>
+    <div class="controls-row">
+      <label>Platform
+        <select id="platformSelect">
+          <option value="">All</option>
+        </select>
+      </label>
+      <label>Suite name contains <input type="text" id="suiteFilter" placeholder="e.g. app_event_manager"></label>
+      <label>Test case contains <input type="text" id="caseFilter" placeholder="e.g. native_sim"></label>
+      <button id="applyFiltersBtn">Apply</button>
+      <button id="resetFiltersBtn">Reset</button>
+      <button id="exportCsvBtn">Export CSV</button>
+    </div>
+  </fieldset>
+</section>
+
+<section>
+  <div class="controls-row">
+    <span class="badge" id="rowsCount">0 rows</span>
+    <span class="badge" id="passCount">passed: 0</span>
+    <span class="badge" id="failCount">failed: 0</span>
+  </div>
+  <hr>
+  <div class="table-wrap">
+    <table id="resultsTable">
+      <thead>
+        <tr>
+              <th data-key="platform" class="sortable">Platform <span class="sort-ind"></span></th>
+              <th data-key="suitePath" class="sortable">Test suite path <span class="sort-ind"></span></th>
+              <th data-key="suiteName" class="sortable">Test suite name <span class="sort-ind"></span></th>
+              <th data-key="caseName" class="sortable">Test case name <span class="sort-ind"></span></th>
+              <th data-key="status" class="sortable">Status <span class="sort-ind"></span></th>
+              <th data-key="reason" class="sortable">Note <span class="sort-ind"></span></th>
+              <th data-key="execTime" class="sortable">Execution time <span class="sort-ind"></span></th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+(function() {
+  'use strict';
+
+  /**
+   * Row shape used by the table
+   * { suitePath, suiteName, caseName, status, reason, execTime, platform }
+   */
+  let allRows = [];
+  let filteredRows = [];
+  let sortKey = '';
+  let sortAsc = true;
+
+  const headerBaseLabels = {};
+
+  // Elements
+  const sourceRadios = document.querySelectorAll('input[name="source"]');
+  const jsonSourceEl = document.getElementById('json-source');
+  const fabricSourceEl = document.getElementById('fabric-source');
+
+  const jsonFileEl = document.getElementById('jsonFile');
+  const jsonUrlEl = document.getElementById('jsonUrl');
+  const loadJsonBtn = document.getElementById('loadJsonBtn');
+
+  const apiBaseEl = document.getElementById('apiBase');
+  const commitShaEl = document.getElementById('commitSha');
+  const loadFabricBtn = document.getElementById('loadFabricBtn');
+
+  const platformSelectEl = document.getElementById('platformSelect');
+  const suiteFilterEl = document.getElementById('suiteFilter');
+  const caseFilterEl = document.getElementById('caseFilter');
+  const applyFiltersBtn = document.getElementById('applyFiltersBtn');
+  const resetFiltersBtn = document.getElementById('resetFiltersBtn');
+  const exportCsvBtn = document.getElementById('exportCsvBtn');
+
+  const rowsCountEl = document.getElementById('rowsCount');
+  const passCountEl = document.getElementById('passCount');
+  const failCountEl = document.getElementById('failCount');
+  const tableBodyEl = document.querySelector('#resultsTable tbody');
+  const headerCells = Array.from(document.querySelectorAll('#resultsTable thead th'));
+
+  headerCells.forEach(th => {
+    const key = th.getAttribute('data-key') || '';
+    const label = th.childNodes[0] ? th.childNodes[0].textContent.trim() : th.textContent.trim();
+    if (key) headerBaseLabels[key] = label;
+    if (key) {
+      th.addEventListener('click', () => {
+        if (sortKey === key) {
+          sortAsc = !sortAsc;
+        } else {
+          sortKey = key;
+          sortAsc = true;
+        }
+        applyFilters();
+        updateSortIndicators();
+      });
+    }
+  });
+
+  // Source switch
+  sourceRadios.forEach(r => {
+    r.addEventListener('change', () => {
+      const val = getSelectedSource();
+      jsonSourceEl.style.display = val === 'json' ? '' : 'none';
+      fabricSourceEl.style.display = val === 'fabric' ? '' : 'none';
+    });
+  });
+
+  function getSelectedSource() {
+    const r = document.querySelector('input[name="source"]:checked');
+    return r ? r.value : 'json';
+  }
+
+  // JSON loader
+  loadJsonBtn.addEventListener('click', async () => {
+    try {
+      let bundle = null;
+      if (jsonFileEl.files && jsonFileEl.files[0]) {
+        bundle = await readLocalJson(jsonFileEl.files[0]);
+      } else if (jsonUrlEl.value) {
+        bundle = await fetchJson(jsonUrlEl.value);
+      } else {
+        alert('Select a local file or enter a bundle URL.');
+        return;
+      }
+      allRows = parseBundleToRows(bundle);
+      populatePlatformSelect(allRows);
+      applyFilters();
+    } catch (e) {
+      console.error(e);
+      alert('Failed to load JSON bundle. See console for details.');
+    }
+  });
+
+  function readLocalJson(file) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onerror = () => reject(fr.error);
+      fr.onload = () => {
+        try { resolve(JSON.parse(fr.result)); } catch (e) { reject(e); }
+      };
+      fr.readAsText(file);
+    });
+  }
+
+  async function fetchJson(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return await res.json();
+  }
+
+  // Fabric loader
+  loadFabricBtn.addEventListener('click', async () => {
+    try {
+      const apiBase = (apiBaseEl.value || '').trim().replace(/\/$/, '');
+      if (!apiBase) { alert('Enter API base URL'); return; }
+      const params = new URLSearchParams();
+      const commit = (commitShaEl.value || '').trim();
+      if (commit) params.set('commit_sha', commit);
+      const platform = (platformSelectEl.value || '').trim();
+      const suite = (suiteFilterEl.value || '').trim();
+      const tcase = (caseFilterEl.value || '').trim();
+      if (platform) params.set('platform', platform);
+      if (suite) params.set('suite', suite);
+      if (tcase) params.set('case', tcase);
+      const url = apiBase + '/fabric/cases' + (params.toString() ? ('?' + params.toString()) : '');
+      const rows = await fetchFabricRows(url);
+      allRows = rows;
+      populatePlatformSelect(allRows); // may be empty until first fetch
+      applyFilters();
+    } catch (e) {
+      console.error(e);
+      alert('Failed to load from Fabric API. See console for details.');
+    }
+  });
+
+  async function fetchFabricRows(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    // Expecting array of objects with the row shape
+    if (!Array.isArray(data)) throw new Error('Invalid API response: expected array');
+    return data.map(normalizeRow);
+  }
+
+  // Bundle parser
+  function parseBundleToRows(bundle) {
+    const rows = [];
+    const runs = (bundle && Array.isArray(bundle.runs)) ? bundle.runs : [];
+    for (const run of runs) {
+      const suites = Array.isArray(run.testsuites) ? run.testsuites : [];
+      for (const ts of suites) {
+        const cases = Array.isArray(ts.testcases) ? ts.testcases : [];
+        if (cases.length === 0) {
+          rows.push(normalizeRow({
+            suitePath: ts.path || '',
+            suiteName: ts.name || '',
+            caseName: '',
+            status: ts.status || '',
+            reason: ts.reason || '',
+            execTime: toNumber(ts.execution_time),
+            platform: ts.platform || ''
+          }));
+          continue;
+        }
+        for (const tc of cases) {
+          rows.push(normalizeRow({
+            suitePath: ts.path || '',
+            suiteName: ts.name || '',
+            caseName: tc.identifier || '',
+            status: (tc.status || ts.status || ''),
+            reason: (tc.reason != null ? tc.reason : ts.reason) || '',
+            execTime: toNumber(tc.execution_time != null ? tc.execution_time : ts.execution_time),
+            platform: ts.platform || ''
+          }));
+        }
+      }
+    }
+    return rows;
+  }
+
+  function toNumber(x) {
+    const n = Number(x);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function normalizeRow(r) {
+    return {
+      suitePath: r.suitePath || '',
+      suiteName: r.suiteName || '',
+      caseName: r.caseName || '',
+      status: (r.status || '').toLowerCase(),
+      reason: r.reason || '',
+      execTime: toNumber(r.execTime),
+      platform: r.platform || ''
+    };
+  }
+
+  // Filters and rendering
+  function populatePlatformSelect(rows) {
+    const unique = Array.from(new Set(rows.map(r => r.platform).filter(Boolean))).sort();
+    const selected = platformSelectEl.value;
+    platformSelectEl.innerHTML = '<option value="">All</option>' + unique.map(p => `<option>${escapeHtml(p)}</option>`).join('');
+    if (unique.includes(selected)) platformSelectEl.value = selected;
+  }
+
+  function applyFilters() {
+    const platform = (platformSelectEl.value || '').toLowerCase();
+    const suiteQ = (suiteFilterEl.value || '').toLowerCase();
+    const caseQ = (caseFilterEl.value || '').toLowerCase();
+
+    filteredRows = allRows.filter(r => {
+      if (platform && r.platform.toLowerCase() !== platform) return false;
+      if (suiteQ && !r.suiteName.toLowerCase().includes(suiteQ)) return false;
+      if (caseQ && !r.caseName.toLowerCase().includes(caseQ)) return false;
+      return true;
+    });
+
+    sortRows();
+    renderTable(filteredRows);
+  }
+
+  applyFiltersBtn.addEventListener('click', applyFilters);
+  resetFiltersBtn.addEventListener('click', () => {
+    platformSelectEl.value = '';
+    suiteFilterEl.value = '';
+    caseFilterEl.value = '';
+    applyFilters();
+  });
+
+  function renderTable(rows) {
+    const pass = rows.filter(r => r.status === 'passed').length;
+    const fail = rows.filter(r => r.status === 'failed').length;
+    rowsCountEl.textContent = rows.length + ' rows';
+    passCountEl.textContent = 'passed: ' + pass;
+    failCountEl.textContent = 'failed: ' + fail;
+
+    tableBodyEl.innerHTML = rows.map(r => {
+      const statusClass = 'status-' + r.status.replace(/\s+/g, '-');
+      return `<tr>
+        <td>${escapeHtml(r.platform)}</td>
+        <td>${escapeHtml(r.suitePath)}</td>
+        <td>${escapeHtml(r.suiteName)}</td>
+        <td>${escapeHtml(r.caseName)}</td>
+        <td class="${statusClass}">${escapeHtml(r.status)}</td>
+        <td>${escapeHtml(String(r.reason || ''))}</td>
+        <td>${formatSeconds(r.execTime)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function sortRows() {
+    if (!sortKey) return;
+    const dir = sortAsc ? 1 : -1;
+    const key = sortKey;
+    filteredRows.sort((a, b) => {
+      let va = a[key];
+      let vb = b[key];
+      if (key === 'execTime') {
+        const na = Number(va) || 0;
+        const nb = Number(vb) || 0;
+        return (na < nb ? -1 : na > nb ? 1 : 0) * dir;
+      }
+      va = (va == null ? '' : String(va)).toLowerCase();
+      vb = (vb == null ? '' : String(vb)).toLowerCase();
+      if (va < vb) return -1 * dir;
+      if (va > vb) return 1 * dir;
+      return 0;
+    });
+  }
+
+  function updateSortIndicators() {
+    headerCells.forEach(th => {
+      const key = th.getAttribute('data-key') || '';
+      const base = key ? (headerBaseLabels[key] || th.textContent.trim()) : th.textContent.trim();
+      const ind = th.querySelector('.sort-ind');
+      if (key && key === sortKey) {
+        if (ind) ind.textContent = sortAsc ? '▲' : '▼';
+        if (th.firstChild && th.firstChild.nodeType === Node.TEXT_NODE) th.firstChild.textContent = base + ' ';
+      } else {
+        if (ind) ind.textContent = '';
+        if (th.firstChild && th.firstChild.nodeType === Node.TEXT_NODE) th.firstChild.textContent = base + ' ';
+      }
+    });
+  }
+
+  function formatSeconds(n) {
+    if (!Number.isFinite(n)) return '';
+    return n.toFixed(2) + ' s';
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+})();
+</script>
+</body>
+</html>
