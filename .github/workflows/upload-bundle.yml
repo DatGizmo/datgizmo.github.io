@@ -1,0 +1,22 @@
+name: Upload Twister bundle
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Upload Twister_NRF-1 bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Twister_NRF-1-bundle
+          path: samples/Twister_NRF-1.bundle.json
+          if-no-files-found: error
+          retention-days: 14
+
+
